@@ -1,0 +1,20 @@
+# IDEA  #
+######################
+*.iml
+*.idea
+.idea/
+*/.idea/**
+*.tgz
+*/target/**
+target/
+venv
+*.tfstate
+*.tfstate.backup
+*.tfvars
+vendor
+composer.lock
+*.retry
+*.retry
+__pycache__
+*.egg-info
+*.pyc
