@@ -1,242 +1,184 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-from pprint import pprint
-from hashlib import sha1
 from os import listdir, unlink, getpid
 from os.path import isfile, isdir, join
 from sys import exit
 import requests
 import time
-import json
+import ovh
 
 
 def main():
-    APP_KEY = ''
-    APP_SEC = ''
-    CONSUMER_KEY = ''
+    client = ovh.Client(
+        endpoint='ovh-eu',  # Endpoint of API OVH Europe
+        application_key='',  # Application Key
+        application_secret='',  # Application Secret
+        consumer_key='',  # Consumer Key
+    )
 
-    OVH_ORGANIZATION = ''
-    OVH_EXCHANGE_SERVICE = ''
-    OVH_MAIL_ACC = ''
-    OVH_API_URL = 'https://eu.api.ovh.com/1.0'
+    ovh_organization = ''
+    ovh_exchange_service = ''
+    ovh_mail_acc = ''
 
-    BACKUP_FILENAME = 'OVH_Exchange_' + time.strftime("%Y%m%d-%H%M%S") + '.pst'
-    BACKUP_DIR = "/storage/backup/mail"
-    BACKUPS_KEEP = 7
+    backup_filename = 'OVH_Exchange_' + time.strftime("%Y%m%d-%H%M%S") + '.pst'
+    backup_dir = "/storage/backup/mail"
+    backups_keep = 7
 
-    PID_FILE = '/tmp/OVH_Exchange_Backup.pid'
+    pid_file = '/tmp/OVH_Exchange_Backup.pid'
 
-    ####################################################################################
+    if isfile(pid_file):
+        with open(pid_file, encoding='utf-8', mode='r').read() as old_pid:
+            if isdir('/proc/' + old_pid) and old_pid != '':
+                print('Script already running.')
+                exit(1)
+        open(pid_file, encoding='utf-8', mode='w').write(str(getpid()))
 
-    if isfile(PID_FILE):
-        OLD_PID = file(PID_FILE, 'r').read()
-        if isdir('/proc/' + OLD_PID) and OLD_PID != '':
-            print 'Script already running.'
+    api = Backups(client, ovh_organization, ovh_exchange_service, ovh_mail_acc)
+
+    if api.check_backup_available():
+        job_id = api.backup_delete()
+        result = api.wait_for_task(job_id)
+        if not result:
+            print('OVH made a boo-boo and we don\'t know what did go wrong. Please try again.')
             exit(1)
-    file(PID_FILE, 'w').write(str(getpid()))
 
-    ####################################################################################
+    job_id = api.backup_create()
+    result = api.wait_for_task(job_id)
+    if not result:
+        print('OVH made a boo-boo and we don\'t know what did go wrong. Please try again.')
+        exit(1)
 
-    OVH = Backups(APP_KEY, APP_SEC, CONSUMER_KEY, OVH_ORGANIZATION, OVH_EXCHANGE_SERVICE, OVH_MAIL_ACC, OVH_API_URL)
+    job_id = api.dl_url_generate()
+    result = api.wait_for_task(job_id)
+    if not result:
+        print('OVH made a boo-boo and we don\'t know what did go wrong. Please try again.')
+        exit(1)
 
-    if OVH.check_backup_available():
-        JOB_ID = OVH.backup_delete()
-        OVH.wait_for_task(unicode(JOB_ID))
+    dl_url = api.dl_url_get()
 
-    JOB_ID = OVH.backup_create()
-    OVH.wait_for_task(unicode(JOB_ID))
+    api.dl_save_file(dl_url, backup_dir, backup_filename)
 
-    JOB_ID = OVH.dl_url_generate()
-    OVH.wait_for_task(unicode(JOB_ID))
+    api.rotate_backup_files(backup_dir, backups_keep)
 
-    DL_URL = OVH.dl_url_get()
+    job_id = api.backup_delete()
+    result = api.wait_for_task(job_id)
+    if not result:
+        print('OVH made a boo-boo and we don\'t know what did go wrong. Please try again.')
+        exit(1)
 
-    OVH.dl_save_file(DL_URL, BACKUP_DIR, BACKUP_FILENAME)
+    unlink(pid_file)
 
-    OVH.rotate_backup_files(BACKUP_DIR, BACKUPS_KEEP)
-
-    JOB_ID = OVH.backup_delete()
-    OVH.wait_for_task(unicode(JOB_ID))
-
-    ####################################################################################
-
-    unlink(PID_FILE)
-
-
-####################################################################################
 
 class Backups:
-    def __init__(self, APP_KEY, APP_SEC, CONSUMER_KEY, OVH_ORGANIZATION, OVH_EXCHANGE_SERVICE, OVH_MAIL_ACC,
-                 OVH_API_URL):
-        self.APP_KEY = APP_KEY
-        self.APP_SEC = APP_SEC
-        self.CONSUMER_KEY = CONSUMER_KEY
-        self.OVH_ORGANIZATION = OVH_ORGANIZATION
-        self.OVH_EXCHANGE_SERVICE = OVH_EXCHANGE_SERVICE
-        self.OVH_MAIL_ACC = OVH_MAIL_ACC
-        self.OVH_API_URL = OVH_API_URL
-        self.HEADERS = {
-            'X-Ovh-Application': self.APP_KEY,
-            'X-Ovh-Consumer': self.CONSUMER_KEY,
-            'X-Ovh-Timestamp': int(time.time()),
-            'X-Ovh-Signature': '',
-            'Content-type': 'application/json'
-        }
+    def __init__(self, client, ovh_organization, ovh_exchange_service, ovh_mail_acc):
+        self.ovh_organization = ovh_organization
+        self.ovh_exchange_service = ovh_exchange_service
+        self.ovh_mail_acc = ovh_mail_acc
+        self.client = client
 
-        self.timeoffset = int(time.time()) - int(requests.get(self.OVH_API_URL + '/auth/time').text)
+    def task_info(self, task_id):
+        result = self.client.get('/email/exchange/{0}/service/{1}/account/{2}/tasks/{3}'.format(
+            self.ovh_organization,
+            self.ovh_exchange_service,
+            self.ovh_mail_acc,
+            task_id
+        ))
 
-    ####################################################################################
+        return result
 
-    def do_request(self, METHOD, QUERY, BODY=''):
-        self.HEADERS['X-Ovh-Timestamp'] = unicode(int(time.time()) + self.timeoffset)
-        self.HEADERS['X-Ovh-Signature'] = '$1$' + sha1(
-            self.APP_SEC + '+' + self.CONSUMER_KEY + '+' + METHOD + '+' + self.OVH_API_URL + QUERY + '+' + BODY + '+' +
-            self.HEADERS['X-Ovh-Timestamp']).hexdigest()
+    def wait_for_task(self, task_id):
+        data = self.task_info(task_id)
 
-        pprint('=== START ===')
-        pprint(METHOD)
-        pprint(self.HEADERS)
-        pprint(QUERY)
+        while data['status'] != 'error' and data['status'] != 'done':
+            time.sleep(10)
+            data = self.task_info(task_id)
 
-        if METHOD.upper() == 'GET':
-            DATA = requests.get(self.OVH_API_URL + QUERY, headers=self.HEADERS)
-            DATA_SCODE = DATA.status_code
-            DATA = json.loads(DATA.text)
-        elif METHOD.upper() == 'POST':
-            DATA = requests.post(self.OVH_API_URL + QUERY, headers=self.HEADERS)
-            DATA_SCODE = DATA.status_code
-            DATA = json.loads(DATA.text)
-        elif METHOD.upper() == 'DELETE':
-            DATA = requests.delete(self.OVH_API_URL + QUERY, headers=self.HEADERS)
-            DATA_SCODE = DATA.status_code
-            DATA = json.loads(DATA.text)
+        if data['status'] == 'error':
+            return False
         else:
-            DATA = False
-            DATA_SCODE = False
-
-        pprint('==> Result')
-        pprint(DATA_SCODE)
-        pprint(DATA)
-        pprint('=== END ===')
-
-        return DATA_SCODE, DATA
-
-    ####################################################################################
-
-    def task_info(self, TASK_ID):
-        METHOD = 'GET'
-        QUERY = '/email/exchange/' + self.OVH_ORGANIZATION + '/service/' + self.OVH_EXCHANGE_SERVICE + '/account/' + self.OVH_MAIL_ACC + '/tasks/' + TASK_ID
-
-        (DATA_SCODE, DATA) = self.do_request(METHOD, QUERY)
-
-        return DATA_SCODE, DATA
-
-    ####################################################################################
-
-    def wait_for_task(self, TASK_ID):
-        (DATA_SCODE, DATA) = self.task_info(TASK_ID)
-
-        while DATA['status'] != 'error' and DATA['status'] != 'done':
-            time.sleep(60)
-            (DATA_SCODE, DATA) = self.task_info(TASK_ID)
-
-    ####################################################################################
+            return True
 
     def check_backup_available(self):
-        METHOD = 'GET'
-        QUERY = '/email/exchange/' + self.OVH_ORGANIZATION + '/service/' + self.OVH_EXCHANGE_SERVICE + '/account/' + self.OVH_MAIL_ACC + '/export'
-
-        (DATA_SCODE, DATA) = self.do_request(METHOD, QUERY)
-
-        if DATA_SCODE == 200:
-            AVAIL = True
+        try:
+            self.client.get('/email/exchange/{0}/service/{1}/account/{2}/export'.format(
+                self.ovh_organization,
+                self.ovh_exchange_service,
+                self.ovh_mail_acc
+            ))
+        except ovh.exceptions.ResourceNotFoundError:
+            return False
         else:
-            AVAIL = False
-
-        return AVAIL
-
-    ####################################################################################
+            return True
 
     def backup_delete(self):
-        METHOD = 'DELETE'
-        QUERY = '/email/exchange/' + self.OVH_ORGANIZATION + '/service/' + self.OVH_EXCHANGE_SERVICE + '/account/' + self.OVH_MAIL_ACC + '/export'
+        result = self.client.delete('/email/exchange/{0}/service/{1}/account/{2}/export'.format(
+            self.ovh_organization,
+            self.ovh_exchange_service,
+            self.ovh_mail_acc
+        ))
 
-        (DATA_SCODE, DATA) = self.do_request(METHOD, QUERY)
-
-        if 'id' in DATA:
-            return DATA['id']
+        if 'id' in result:
+            return result['id']
         else:
             return None
-
-    ####################################################################################
 
     def backup_create(self):
-        METHOD = 'POST'
-        QUERY = '/email/exchange/' + self.OVH_ORGANIZATION + '/service/' + self.OVH_EXCHANGE_SERVICE + '/account/' + self.OVH_MAIL_ACC + '/export'
+        result = self.client.post('/email/exchange/{0}/service/{1}/account/{2}/export'.format(
+            self.ovh_organization,
+            self.ovh_exchange_service,
+            self.ovh_mail_acc
+        ))
 
-        (DATA_SCODE, DATA) = self.do_request(METHOD, QUERY)
-
-        if 'id' in DATA:
-            return DATA['id']
+        if 'id' in result:
+            return result['id']
         else:
             return None
-
-    ####################################################################################
 
     def dl_url_generate(self):
-        METHOD = 'POST'
-        QUERY = '/email/exchange/' + self.OVH_ORGANIZATION + '/service/' + self.OVH_EXCHANGE_SERVICE + '/account/' + self.OVH_MAIL_ACC + '/exportURL'
+        result = self.client.post('/email/exchange/{0}/service/{1}/account//exporturl'.format(
+            self.ovh_organization,
+            self.ovh_exchange_service,
+            self.ovh_mail_acc
+        ))
 
-        (DATA_SCODE, DATA) = self.do_request(METHOD, QUERY)
-
-        if 'id' in DATA:
-            return DATA['id']
+        if 'id' in result:
+            return result['id']
         else:
             return None
-
-    ####################################################################################
 
     def dl_url_get(self):
-        METHOD = 'GET'
-        QUERY = '/email/exchange/' + self.OVH_ORGANIZATION + '/service/' + self.OVH_EXCHANGE_SERVICE + '/account/' + self.OVH_MAIL_ACC + '/exportURL'
+        result = self.client.get('/email/exchange/{0}/service/{1}/account/{2}/exporturl'.format(
+            self.ovh_organization,
+            self.ovh_exchange_service,
+            self.ovh_mail_acc
+        ))
 
-        (DATA_SCODE, DATA) = self.do_request(METHOD, QUERY)
-
-        if 'url' in DATA:
-            return DATA['url']
+        if 'url' in result:
+            return result['url']
         else:
             return None
 
-    ####################################################################################
+    def dl_save_file(self, url, backup_dir, backup_filename):
+        data = requests.get(url, stream=True)
 
-    def dl_save_file(self, URL, BACKUP_DIR, BACKUP_FILENAME):
-        DATA = requests.get(URL, stream=True)
+        with open(backup_dir + '/' + backup_filename, 'wb') as backup_file:
+            for chunk in data.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    backup_file.write(chunk)
 
-        BACKUP_FILE = open(BACKUP_DIR + '/' + BACKUP_FILENAME, 'wb')
-        for CHUNK in DATA.iter_content(chunk_size=1024 * 1024):
-            if CHUNK:
-                BACKUP_FILE.write(CHUNK)
+    def rotate_backup_files(self, backup_dir, backups_keep):
+        backup_files = []
+        for entry in listdir(backup_dir):
+            if isfile(join(backup_dir, entry)):
+                backup_files.append(join(backup_dir, entry))
 
-        BACKUP_FILE.flush()
-        BACKUP_FILE.close()
+        backup_files.sort(reverse=True)
 
-    ####################################################################################
+        if len(backup_files) > backups_keep:
+            for ct in range(backups_keep, len(backup_files)):
+                unlink(backup_files[ct])
 
-    def rotate_backup_files(self, BACKUP_DIR, BACKUPS_KEEP):
-        BACKUP_FILES = []
-        for ENTRY in listdir(BACKUP_DIR):
-            if isfile(join(BACKUP_DIR, ENTRY)):
-                BACKUP_FILES.append(join(BACKUP_DIR, ENTRY))
-
-        BACKUP_FILES.sort(reverse=True)
-
-        if len(BACKUP_FILES) > BACKUPS_KEEP:
-            for CT in range(BACKUPS_KEEP, len(BACKUP_FILES)):
-                unlink(BACKUP_FILES[CT])
-
-
-####################################################################################
 
 if __name__ == '__main__':
     main()
