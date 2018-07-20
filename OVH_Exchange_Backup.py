@@ -25,14 +25,15 @@ def main():
     backup_dir = "/storage/backup/mail"
     backups_keep = 7
 
-    pid_file = '/tmp/OVH_Exchange_Backup.pid'
+    pid_file = '/run/OVH_Exchange_Backup.pid'
 
     if isfile(pid_file):
-        with open(pid_file, encoding='utf-8', mode='r').read() as old_pid:
-            if isdir('/proc/' + old_pid) and old_pid != '':
+        with open(pid_file, 'r') as old_pid:
+            pid = old_pid.read()
+            if isdir('/proc/' + pid) and pid != '':
                 print('Script already running.')
                 exit(1)
-        open(pid_file, encoding='utf-8', mode='w').write(str(getpid()))
+    open(pid_file, encoding='utf-8', mode='w').write(str(getpid()))
 
     api = Backups(client, ovh_organization, ovh_exchange_service, ovh_mail_acc)
 
@@ -136,7 +137,7 @@ class Backups:
             return None
 
     def dl_url_generate(self):
-        result = self.client.post('/email/exchange/{0}/service/{1}/account//exporturl'.format(
+        result = self.client.post('/email/exchange/{0}/service/{1}/account/{2}/exportURL'.format(
             self.ovh_organization,
             self.ovh_exchange_service,
             self.ovh_mail_acc
@@ -148,7 +149,7 @@ class Backups:
             return None
 
     def dl_url_get(self):
-        result = self.client.get('/email/exchange/{0}/service/{1}/account/{2}/exporturl'.format(
+        result = self.client.get('/email/exchange/{0}/service/{1}/account/{2}/exportURL'.format(
             self.ovh_organization,
             self.ovh_exchange_service,
             self.ovh_mail_acc
